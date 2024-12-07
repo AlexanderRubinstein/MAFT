@@ -29,6 +29,7 @@ from .modeling.clip_adapter import (
 )
 from .mask_former_model import MaskFormer
 from .modeling.clip_adapter.clip import build_clip_model, crop_with_mask, CLIP
+from .imagenet_classes import get_in_classes_prompts
 
 
 @META_ARCH_REGISTRY.register()
@@ -59,7 +60,7 @@ class MAFT_DEMO(MaskFormer):
         test_topk_per_image: int,
         cfg,
         clip_pixel_mean,
-        clip_pixel_std, 
+        clip_pixel_std,
         clip_model_name,
         dis_weight,
 
@@ -104,7 +105,7 @@ class MAFT_DEMO(MaskFormer):
         )
         self.clip_adapter: ClipAdapter = clip_adapter
         self._region_clip_adapter = region_clip_adapter
-       
+
 
         self.clip_ensemble: bool = clip_ensemble
         self.clip_ensemble_weight: float = clip_ensemble_weight
@@ -132,7 +133,7 @@ class MAFT_DEMO(MaskFormer):
             else:
                 assert 'IPCLIP' in name, name
                 # clip_adapter
-                if not ('transformer.resblocks' in name): 
+                if not ('transformer.resblocks' in name):
                     param.requires_grad = False
                 if 'mlp' in name:
                     param.requires_grad = False
@@ -160,7 +161,7 @@ class MAFT_DEMO(MaskFormer):
             mask_matting=cfg.MODEL.CLIP_ADAPTER.MASK_MATTING,
             region_resized=cfg.MODEL.CLIP_ADAPTER.REGION_RESIZED,
         )
-        
+
         init_kwargs["clip_adapter"] = clip_adapter
         init_kwargs["clip_ensemble"] = cfg.MODEL.CLIP_ADAPTER.CLIP_ENSEMBLE
         init_kwargs[
@@ -170,7 +171,7 @@ class MAFT_DEMO(MaskFormer):
         init_kwargs["metadata"] = MetadataCatalog.get(cfg.DATASETS.TEST[0])
         init_kwargs["semantic_on"] = True
 
-        init_kwargs["cfg"] = cfg 
+        init_kwargs["cfg"] = cfg
 
         init_kwargs["clip_model_name"] = cfg.MODEL.CLIP_ADAPTER.CLIP_MODEL_NAME
         init_kwargs["clip_pixel_mean"]=cfg.MODEL.CLIP_PIXEL_MEAN
@@ -206,9 +207,10 @@ class MAFT_DEMO(MaskFormer):
                     segments_info (list[dict]): Describe each segment in `panoptic_seg`.
                         Each dict contains keys "id", "category_id", "isthing".
         """
+
         dataset_name = "openvocab_dataset"
-        class_names = self.get_class_name_list(dataset_name)  
-        
+        class_names = self.get_class_name_list(dataset_name)
+
         # clip_images
         images = [x["image"].to(self.device) for x in batched_inputs]
         clip_images = [(x - self.clip_pixel_mean) / self.clip_pixel_std for x in images]
@@ -219,7 +221,7 @@ class MAFT_DEMO(MaskFormer):
         images = [x["image"].to(self.device) for x in batched_inputs]
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
         images = ImageList.from_tensors(images, self.size_divisibility)
-        
+
 
         with torch.no_grad():
             features = self.backbone(images.tensor)
@@ -237,27 +239,66 @@ class MAFT_DEMO(MaskFormer):
         image_features = self.IPCLIP(clip_images_480, mask_results)
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
+        ####
+        def load_image(image_path):
+            from PIL import Image
+            from torchvision.transforms import ToTensor
+            image = Image.open(image_path).convert("RGB")  # Convert to RGB format if needed
+
+            # Convert to a PyTorch tensor
+            to_tensor = ToTensor()
+            tensor = to_tensor(image)
+
+            return tensor
+
+        def save_image(tensor, path):
+            import torch
+            from torchvision.transforms import ToPILImage
+            tensor = tensor * 255
+            tensor = tensor.byte()
+
+            # Convert to PIL Image
+            to_pil = ToPILImage()
+            image = to_pil(tensor)
+
+            # Save the image
+            image.save(path)
+
+        in_class_names = get_in_classes_prompts()
+        with torch.no_grad():
+            in_text_features = self.clip_adapter.get_text_features(in_class_names, )
+        idx = 41
+        # single_mask = mask_results[0][idx]
+        single_mask_path = "/home/oh/arubinstein17/github/MAFT/masks_saved/41.png"
+        single_mask = load_image(single_mask_path)[0].cuda()
+        single_mask_features = torch.stack([single_mask] * 100).unsqueeze(0)
+        single_mask_image_features = self.IPCLIP(clip_images_480, single_mask_features)
+        single_mask_image_features = single_mask_image_features / single_mask_image_features.norm(dim=-1, keepdim=True)
+        single_mask_clip_cls = self.clip_adapter.get_sim_logits(in_text_features, single_mask_image_features)
+
+        ####
+
         clip_cls = self.clip_adapter.get_sim_logits(text_features, image_features)
 
         if self.training:
             # self distillation loss
             with torch.no_grad():
                 image_features_t = self.clip_adapter.get_image_features(clip_images_480, None)
-                image_features_t = image_features_t / image_features_t.norm(dim=-1, keepdim=True)             
+                image_features_t = image_features_t / image_features_t.norm(dim=-1, keepdim=True)
                 clip_cls_t = self.clip_adapter.get_sim_logits(text_features, image_features_t) # b*C
             image_features_s = self.IPCLIP(clip_images_480, None)
-            image_features_s = image_features_s / image_features_s.norm(dim=-1, keepdim=True)             
+            image_features_s = image_features_s / image_features_s.norm(dim=-1, keepdim=True)
             clip_cls_s = self.clip_adapter.get_sim_logits(text_features, image_features_s) # b*C
-            clip_cls_s = F.softmax(clip_cls_s[...,:-1], dim=-1)  
+            clip_cls_s = F.softmax(clip_cls_s[...,:-1], dim=-1)
             clip_cls_t = F.softmax(clip_cls_t[...,:-1], dim=-1)
             dis_loss = self.dis_loss(clip_cls_s, clip_cls_t)
 
             # mask aware loss
             gt_instances = [x["sem_instances"].to(self.device) for x in batched_inputs]
             targets = self.prepare_targets(gt_instances, images)
-            
+
             clip_cls = clip_cls.squeeze()
-            logits_per_image = F.softmax(clip_cls[...,:-1], dim=-1)  # 16*100*156             
+            logits_per_image = F.softmax(clip_cls[...,:-1], dim=-1)  # 16*100*156
 
             logits_per_instance = [] # bn * 100
             labels_per_instance = [] # bn * h*w
@@ -271,7 +312,7 @@ class MAFT_DEMO(MaskFormer):
                     logits_per_instance.append(logiti)
                     labels_per_instance.append(labeli)
                     masks_per_instance.append(maski)
-            
+
             masks_per_instance = torch.cat(masks_per_instance, dim = 0)
             labels_per_instance = torch.cat(labels_per_instance, dim = 0)
             logits_per_instance = torch.cat(logits_per_instance, dim = 0)
@@ -279,23 +320,23 @@ class MAFT_DEMO(MaskFormer):
             ious = self.get_iou(masks_per_instance, labels_per_instance).detach()  # bs*100
             ious = self.mynorm(ious)
             ma_loss = self.ma_loss(logits_per_instance, ious)
-            
+
             losses = {}
             losses['ma_loss'] = ma_loss
             losses['dis_loss'] = dis_loss * self.dis_weight
-            
+
             return losses
         else:
             mask_cls_results = outputs["pred_logits"]
             mask_pred_results = outputs["pred_masks"]
-            
+
             mask_pred_results = F.interpolate(
                 mask_pred_results,
                 size=(images.tensor.shape[-2], images.tensor.shape[-1]),
                 mode="bilinear",
                 align_corners=True,
             )
-            
+
             processed_results = []
             for mask_cls_result, mask_pred_result, input_per_image, image_size, clip_cl in zip(
                 mask_cls_results, mask_pred_results, batched_inputs, images.image_sizes, clip_cls
@@ -320,7 +361,7 @@ class MAFT_DEMO(MaskFormer):
         mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]
         mask_pred = mask_pred.sigmoid()
         # get the classification result from clip model
-        
+
         if self.clip_ensemble:
 
             bin_mask = mask_pred > 0.5
@@ -338,7 +379,7 @@ class MAFT_DEMO(MaskFormer):
                     ).to(mask_cls.device)[None, :]
                 else:
                     trained_mask = mask_cls.new_zeros(mask_cls.shape)
-                
+
                 mask_cls = trained_mask * torch.pow(
                     mask_cls, self.clip_ensemble_weight
                 ) * torch.pow(map_back_clip_cls, 1 - self.clip_ensemble_weight) + (
@@ -351,9 +392,9 @@ class MAFT_DEMO(MaskFormer):
             else:
                 mask_cls = clip_cl#[valid_flag]
                 mask_pred = mask_pred#[valid_flag]
-        
+
         semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
-        
+
         return semseg
 
     def get_class_name_list(self, dataset_name):
@@ -364,7 +405,7 @@ class MAFT_DEMO(MaskFormer):
 
 
     def get_iou(self, pred, target):
-        # pred = pred.sigmoid() 
+        # pred = pred.sigmoid()
         b, c, h, w = pred.shape
         if len(target.shape)!=len(pred.shape):
             target = target.unsqueeze(1)
@@ -380,7 +421,7 @@ class MAFT_DEMO(MaskFormer):
 
         pred = pred.reshape(b, c,-1)
         target = target.reshape(b, 1, -1)
-        
+
         #compute the IoU of the foreground
         Iand1 = torch.sum(target*pred, dim = -1)
         Ior1 = torch.sum(target, dim = -1) + torch.sum(pred, dim = -1)-Iand1 + 0.0000001

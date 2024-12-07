@@ -1,0 +1,63 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python train_net.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./train_net.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--config-file",
+                // "im.png"
+                "configs/coco-stuff-164k-156/eval.yaml",
+                "--num-gpus",
+                "1",
+                "--eval-only"
+            ],
+        },
+        {
+            "name": "Python demo/demo.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./demo/demo.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--input",
+                // "im.png"
+                // "/home/oh/arubinstein17/github/MAFT/Mute-swan-other-birds.png"
+                "/home/oh/arubinstein17/github/MAFT/U6em2xzAkE5ETebzUkiMYE.png"
+            //     "launch",
+            //     "--data_dir",
+            //     "./cur_data",
+            //     "--output_dir",
+            //     "erm-resnet50/pacs",
+            //     "--command_launcher",
+            //     // "multi_gpu",
+            //     "local",
+            //     "--algorithms",
+            //     "ERM",
+            //     "--datasets",
+            //     "PACS",
+            //     "--n_hparams",
+            //     // "3",
+            //     "1",
+            //     "--n_trials",
+            //     // "2",
+            //     "1",
+            //     "--single_test_envs",
+            //     "--hparams",
+            //     "{\"arch\": \"resnet50\"}",
+            //     "--skip_confirmation"
+            ],
+            // "env": {
+            //     "PROJECT_ROOT_PROVIDED_FOR_STUNED": "/home/oh/arubinstein17/github/densification"
+            // }
+        },
+    ]
+}
