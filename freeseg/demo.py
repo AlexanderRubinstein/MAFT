@@ -269,7 +269,8 @@ class MAFT_DEMO(MaskFormer):
             in_text_features = self.clip_adapter.get_text_features(in_class_names, )
         idx = 41
         # single_mask = mask_results[0][idx]
-        single_mask_path = "/home/oh/arubinstein17/github/MAFT/masks_saved/41.png"
+        # single_mask_path = "/home/oh/arubinstein17/github/MAFT/masks_saved/41.png" # lemon
+        single_mask_path = "/home/oh/arubinstein17/github/MAFT/masks_saved/62.png" # plate
         single_mask = load_image(single_mask_path)[0].cuda()
         single_mask_features = torch.stack([single_mask] * 100).unsqueeze(0)
         single_mask_image_features = self.IPCLIP(clip_images_480, single_mask_features)
@@ -277,6 +278,32 @@ class MAFT_DEMO(MaskFormer):
         single_mask_clip_cls = self.clip_adapter.get_sim_logits(in_text_features, single_mask_image_features)
 
         ####
+
+        # CLIP_PIXEL_MEAN:
+        #     - 122.7709383
+        #     - 116.7460125
+        #     - 104.09373615
+        # CLIP_PIXEL_STD:
+        #     - 68.5005327
+        #     - 66.6321579
+        #     - 70.323163
+        # SIZE_DIVISIBILITY: 32
+
+        wrapped_model = IPClipWrapper(
+            self.IPCLIP,
+            # text_features,
+            text_features=in_text_features,
+            clip_pixel_mean=self.clip_pixel_mean,
+            clip_pixel_std=self.clip_pixel_std,
+            size_divisibility=self.size_divisibility,
+            get_sim_logits=self.clip_adapter.get_sim_logits
+        )
+
+        images = [x["image"].to(self.device) for x in batched_inputs]
+        masks = single_mask.unsqueeze(0)
+        single_mask_clip_cls_v2 = wrapped_model(images, masks)
+
+        #####
 
         clip_cls = self.clip_adapter.get_sim_logits(text_features, image_features)
 
@@ -442,3 +469,69 @@ class MAFT_DEMO(MaskFormer):
         if self._region_clip_adapter is None:
             return self.clip_adapter
         return self._region_clip_adapter
+
+
+class IPClipWrapper(torch.nn.Module):
+
+    def __init__(
+        self,
+        inner_clip,
+        text_features,
+        clip_pixel_mean,
+        clip_pixel_std,
+        size_divisibility,
+        get_sim_logits,
+    ):
+        super().__init__()
+        self.inner_clip = inner_clip
+        self.text_features = text_features
+        self.clip_pixel_mean = clip_pixel_mean
+        self.clip_pixel_std = clip_pixel_std
+        self.size_divisibility = size_divisibility
+        self.get_sim_logits = get_sim_logits
+        # self.tokenizer = tokenizer
+        # self.preprocess = preprocess
+
+    def forward(self, images, masks):
+
+        def normalize(features):
+            features = features / features.norm(dim=-1, keepdim=True)
+            return features
+
+        N_MASKS = 100
+        CLIP_IMAGE_SIZE = (480, 480)
+
+        # clip_images
+        clip_images = [(x - self.clip_pixel_mean) / self.clip_pixel_std for x in images]
+        clip_images = ImageList.from_tensors(clip_images, self.size_divisibility)
+        clip_images_480 = F.interpolate(
+            clip_images.tensor,
+            size=CLIP_IMAGE_SIZE,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        # repeat mask 100 times
+        # masks_100 = torch.stack([masks.unsqueeze(1)] * N_MASKS, dim=1).unsqueeze(0)
+        masks_100 = torch.cat([masks] * N_MASKS, dim=0).unsqueeze(0)
+
+        mask_image_features = self.inner_clip(clip_images_480, masks_100)
+        mask_image_features = normalize(mask_image_features)
+        mask_clip_cls = self.get_sim_logits(self.text_features, mask_image_features)
+        return mask_clip_cls[:, 0, ...]
+        # return get_text_probs(
+        #     self.model,
+        #     x,
+        #     self.text_features,
+        #     subset_tensor=None
+        # )
+
+
+# def get_text_probs(model, image, text_features, subset_tensor):
+#     image_features = model.encode_image(image)
+
+#     image_features /= image_features.norm(dim=-1, keepdim=True)
+#     text_probs = (100.0 * image_features @ text_features.T)
+#     if subset_tensor is not None:
+#         text_probs = text_probs * subset_tensor
+#     return text_probs
